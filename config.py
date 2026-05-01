@@ -4,7 +4,7 @@ Constants, bilingual strings, treatment DB, fertilizer DB.
 """
 
 # API and paths
-WEATHER_API_KEY = "e0b6e39863d5960388618a1210b8afa1"  # Replace with your OpenWeatherMap API key
+WEATHER_API_KEY = st.secrets.get("WEATHER_API_KEY", "")  # Replace with your OpenWeatherMap API key
 CITY = "Vellore"
 IMG_SIZE = (224, 224)
 MODEL_PATH = "models/agroguard_model.keras"
