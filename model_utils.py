@@ -1,122 +1,100 @@
 """
-AgroGuard AI v5.0 - Model utilities
-Includes a DEMO-MODE fallback so the UI runs even without the trained model.
+AgroGuard AI v4.0 — Model utilities
 """
 
-import os
-import json
-import random
+import os, json
 import numpy as np
 import streamlit as st
 from config import MODEL_PATH, CLASS_INDICES_PATH, IMG_SIZE
 
-# A safe default class list when class_indices.json is missing, for demo mode
-_DEMO_CLASSES = [
-    "Tomato___Bacterial_spot",
-    "Tomato___Early_blight",
-    "Tomato___Late_blight",
-    "Tomato___Leaf_Mold",
-    "Tomato___Septoria_leaf_spot",
-    "Tomato___Spider_mites",
-    "Tomato___Target_Spot",
-    "Tomato___Tomato_Yellow_Leaf_Curl_Virus",
-    "Tomato___Tomato_mosaic_virus",
-    "Tomato___healthy",
-    "Potato___Early_blight",
-    "Potato___Late_blight",
-    "Potato___healthy",
-    "Pepper__bell___Bacterial_spot",
-    "Pepper__bell___healthy",
-]
 
+CLASS_NAME_MAP = {
+    "Pepper__bell___Bacterial_spot": "Pepper__bell___Bacterial_spot",
+    "Pepper__bell___healthy": "Pepper__bell___healthy",
+    "Potato___Early_blight": "Potato___Early_blight",
+    "Potato___Late_blight": "Potato___Late_blight",
+    "Potato___healthy": "Potato___healthy",
+    "Tomato_Bacterial_spot": "Tomato___Bacterial_spot",
+    "Tomato_Early_blight": "Tomato___Early_blight",
+    "Tomato_Late_blight": "Tomato___Late_blight",
+    "Tomato_Leaf_Mold": "Tomato___Leaf_Mold",
+    "Tomato_Septoria_leaf_spot": "Tomato___Septoria_leaf_spot",
+    "Tomato_Spider_mites_Two_spotted_spider_mite": "Tomato___Spider_mites Two-spotted_spider_mite",
+    "Tomato__Target_Spot": "Tomato___Target_Spot",
+    "Tomato__Tomato_YellowLeaf__Curl_Virus": "Tomato___Tomato_Yellow_Leaf_Curl_Virus",
+    "Tomato__Tomato_mosaic_virus": "Tomato___Tomato_mosaic_virus",
+    "Tomato_healthy": "Tomato___healthy",
+}
+
+
+def normalize_class_name(name: str) -> str:
+    """Returns canonical normalized class name matching TREATMENT_DB keys."""
+    if not name:
+        return name
+    return CLASS_NAME_MAP.get(name, name)
+
+
+@st.cache_resource(show_spinner="Loading AI model…")
 def load_model_assets():
-    """
-    Load the trained model and class indices, or fall back to demo mode.
-    Returns: (model, class_names, mode)
-    - mode: "real" if model loaded successfully, "demo" if fallback
-    """
     try:
-        # Try to load the Keras model
-        from tensorflow.keras.models import load_model
-        model = load_model(MODEL_PATH)
-    except Exception as e:
-        # Model failed to load (missing/corrupt/TF error) — fall back to demo
-        st.warning(f"Model load failed ({MODEL_PATH}) — running in demo mode.")
-        # Log to console for debugging
-        try:
-            print("Model load error:", str(e))
-        except:  # pragma: no cover - defensive
-            pass
-        model = None
+        import tensorflow as tf
+    except ImportError:
+        st.error("TensorFlow not installed. Run: pip install tensorflow")
+        return None, None
 
-    # Load class indices — support both dict (name->idx) and list formats
-    class_names = None
+    if not os.path.exists(MODEL_PATH) or not os.path.exists(CLASS_INDICES_PATH):
+        return None, None
+
     try:
-        if os.path.isfile(CLASS_INDICES_PATH):
-            with open(CLASS_INDICES_PATH, 'r', encoding='utf-8') as f:
-                class_indices = json.load(f)
-            if isinstance(class_indices, dict):
-                class_names = list(class_indices.keys())
-            elif isinstance(class_indices, list):
-                class_names = class_indices
+        model = tf.keras.models.load_model(MODEL_PATH)
+        with open(CLASS_INDICES_PATH) as f:
+            raw = json.load(f)
+
+        if isinstance(raw, dict):
+            if all(str(k).isdigit() for k in raw.keys()):
+                class_names = [raw[str(i)] for i in range(len(raw))]
+            else:
+                class_names = [None] * len(raw)
+                for name, idx in raw.items():
+                    class_names[idx] = name
+        else:
+            class_names = list(raw)
+
+        class_names = [normalize_class_name(name) for name in class_names]
+        return model, class_names
     except Exception as e:
-        st.warning(f"Failed to load class indices ({CLASS_INDICES_PATH}) — using demo classes.")
-        try:
-            print("Class indices load error:", str(e))
-        except:  # pragma: no cover
-            pass
+        st.error(f"Model load error: {e}")
+        return None, None
 
-    if model is None or not class_names:
-        # If anything failed, return demo mode defaults
-        return None, _DEMO_CLASSES, "demo"
-
-    return model, class_names, "real"
 
 def preprocess_image(img):
-    """
-    Preprocess PIL image for model input.
-    Returns: numpy array (1, 224, 224, 3) normalized to [-1, 1]
-    """
     from PIL import Image
-    
-    # Resize to 224x224
-    img = img.resize(IMG_SIZE)
-    
-    # Convert to numpy array
-    arr = np.array(img, dtype=np.float32)
-    
-    # Normalize to [-1, 1] (typical for MobileNet)
-    arr = arr / 127.5 - 1.0
-    
-    # Add batch dimension
-    arr = np.expand_dims(arr, axis=0)
-    
-    return arr
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    img = img.resize(IMG_SIZE, Image.Resampling.LANCZOS)
+    arr = np.array(img, dtype=np.float32) / 127.5 - 1.0
+    return np.expand_dims(arr, axis=0)
 
-def predict_with_confidence(model, arr, class_names):
-    """
-    Make predictions with confidence levels.
-    Returns: (best_class, confidence, top5_list, full_predictions)
-    """
-    if model is None:
-        # Demo mode - return mock predictions
-        best_class = random.choice(class_names)
-        confidence = random.uniform(75, 98)
-        top5 = [(c, random.uniform(50, 99)) for c in random.sample(class_names, 5)]
-        top5 = sorted(top5, key=lambda x: x[1], reverse=True)
-        return best_class, confidence, top5, None
-    
-    # Real model prediction
-    predictions = model.predict(arr)
-    pred_array = predictions[0]
-    
-    # Get top-5
-    top5_indices = np.argsort(pred_array)[-5:][::-1]
-    top5 = [(class_names[idx], float(pred_array[idx]) * 100) for idx in top5_indices]
-    
-    # Best prediction
-    best_idx = np.argmax(pred_array)
+
+def predict_with_confidence(model, img_array, class_names):
+    try:
+        raw = model.predict(img_array, verbose=0)[0]
+    except Exception as e:
+        raise RuntimeError(f"Model prediction failed: {e}") from e
+
+    # Fix double softmax: if output is already probabilities (in [0, 1] and sums to ~1), do not re-apply softmax.
+    is_prob = np.all(raw >= 0.0) and np.all(raw <= 1.0) and np.isclose(float(np.sum(raw)), 1.0, atol=1e-2)
+    if is_prob:
+        probs = np.array(raw, dtype=np.float32)
+    else:
+        # Numerically stable NumPy softmax (avoiding redundant TensorFlow re-invocations)
+        shift_raw = raw - np.max(raw)
+        exp_raw = np.exp(shift_raw)
+        probs = np.array(exp_raw / np.sum(exp_raw), dtype=np.float32)
+
+    best_idx   = int(np.argmax(probs))
+    confidence = float(probs[best_idx] * 100.0)
     best_class = class_names[best_idx]
-    confidence = float(pred_array[best_idx]) * 100
-    
-    return best_class, confidence, top5, pred_array
+    top5 = [(class_names[i], float(probs[i] * 100.0))
+            for i in np.argsort(probs)[-5:][::-1]]
+    return best_class, confidence, top5, probs
